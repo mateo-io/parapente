@@ -42,13 +42,17 @@ for migration in "$task_root"/db/migrations/*.sql; do
   psql "$database_url" -v ON_ERROR_STOP=1 -f "$migration"
 done
 
-if [[ "${PARAPENTE_SKIP_OSM_IMPORT:-0}" != "1" ]]; then
+if [[ "${PARAPENTE_SKIP_IMPORTS:-0}" != "1" ]]; then
   if [[ ! -d "$task_root/web/node_modules/pg" ]]; then
-    echo "Web dependencies are missing. Run npm install in web/ before importing OpenStreetMap sites."
+    echo "Web dependencies are missing. Run npm install in web/ before importing site data."
     exit 1
   fi
 
-  DATABASE_URL="$database_url" npm --prefix "$task_root/web" run db:import:osm
+  # Order matters. Sites must exist before elevations can be filled, elevations
+  # before lifts can compute walk ascent, and both before stations are linked.
+  # Running only the OpenStreetMap import leaves the app without elevations, so
+  # glide reachability, the lift panel and the station readout are all dead.
+  DATABASE_URL="$database_url" npm --prefix "$task_root/web" run db:import:all
 fi
 
 echo "Parapente database is ready at ${database_url}."

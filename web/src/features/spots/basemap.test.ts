@@ -32,9 +32,18 @@ describe("basemap overlay registry", () => {
     expect(new Set([...sourceIds, ...layerIds]).size).toBe(OVERLAYS.length * 2)
   })
 
-  it("builds WMTS urls with the maplibre tile placeholders intact", () => {
+  it("builds tile urls with the maplibre placeholders intact, per service", () => {
     for (const overlay of OVERLAYS) {
       const url = tileUrlFor(overlay)
+
+      if (overlay.service === "wms") {
+        // Air-navigation obstacles are WMS only; a WMTS request 400s.
+        expect(url.startsWith("https://wms.geo.admin.ch/")).toBe(true)
+        expect(url).toContain("{bbox-epsg-3857}")
+        expect(url).toContain(`LAYERS=${overlay.wmtsLayer}`)
+        continue
+      }
+
       expect(url).toContain(`/${overlay.wmtsLayer}/`)
       expect(url).toContain("{z}/{x}/{y}")
       expect(url.endsWith(`.${overlay.format}`)).toBe(true)
@@ -45,20 +54,17 @@ describe("basemap overlay registry", () => {
   it("credits the data owner on every overlay source", () => {
     for (const overlay of OVERLAYS) {
       expect(rasterSourceFor(overlay).attribution).toBe(overlay.attribution)
-      expect(overlay.attribution).toMatch(/swisstopo|BAFU/)
+      expect(overlay.attribution).toMatch(/swisstopo|BAFU|BAZL/)
     }
   })
 
   it("keeps the OpenStreetMap credit on the base style", () => {
     expect(BASE_ATTRIBUTION).toContain("OpenStreetMap")
   })
-
-  it("labels and captions every overlay in both locales", () => {
+  it("labels and captions every overlay", () => {
     for (const overlay of OVERLAYS) {
-      for (const locale of ["en", "de"] as const) {
-        expect(overlay.label[locale].length).toBeGreaterThan(0)
-        expect(overlay.caption[locale].length).toBeGreaterThan(0)
-      }
+      expect(overlay.label.length).toBeGreaterThan(0)
+      expect(overlay.caption.length).toBeGreaterThan(0)
     }
   })
 
@@ -66,6 +72,15 @@ describe("basemap overlay registry", () => {
     for (const overlay of OVERLAYS) {
       expect(overlay.opacity).toBeGreaterThan(0)
       expect(overlay.opacity).toBeLessThanOrEqual(1)
+    }
+  })
+
+  it("warns on every airspace layer that it is not a clearance", () => {
+    // Airspace zones activate and deactivate. A raster tile cannot express that,
+    // so the caption must send the pilot to DABS rather than imply currency.
+    for (const overlay of OVERLAYS) {
+      if (!overlay.id.startsWith("airspace")) continue
+      expect(overlay.caption).toMatch(/DABS/)
     }
   })
 

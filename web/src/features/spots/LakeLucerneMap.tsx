@@ -6,6 +6,17 @@ import type { GeoJSONSource, Map, MapLayerMouseEvent } from "maplibre-gl"
 import { useSystemTheme } from "../../hooks/useSystemTheme"
 import { BASE_ATTRIBUTION, baseStyleFor, syncOverlays } from "./basemap"
 import type { MapTheme, OverlayId } from "./basemap"
+import {
+  MARKER_ICON_EXPRESSION,
+  registerMarkerImages,
+} from "./siteMarkers"
+import { activeGlideLaunch, addGlideLayers, setGlideData } from "./glideLayers"
+import {
+  addStationLayers,
+  setStationData,
+  visibleStations,
+} from "./stationLayers"
+import type { StationPoint } from "./stationLayers"
 import type { FlyingSite } from "./types"
 
 interface LakeLucerneMapProps {
@@ -13,6 +24,8 @@ interface LakeLucerneMapProps {
   selectedSlug?: string
   onSelect: (slug: string) => void
   overlays: OverlayId[]
+  stations: StationPoint[]
+  showAllStations: boolean
 }
 
 interface SiteFeatureProperties {
@@ -58,7 +71,11 @@ function addSiteLayers(
     data,
     cluster: true,
     clusterMaxZoom: 11,
-    clusterRadius: 42,
+    // Only collapse a group once it is genuinely dense. A bubble reading "2"
+    // hides more than it summarises, so small groups stay as individual points
+    // and are allowed to overlap instead.
+    clusterMinPoints: 6,
+    clusterRadius: 26,
   })
 
   map.addLayer({
@@ -68,7 +85,7 @@ function addSiteLayers(
     filter: ["has", "point_count"],
     paint: {
       "circle-color": isDark ? "#eef7ef" : "#183126",
-      "circle-radius": ["step", ["get", "point_count"], 18, 10, 22, 30, 27],
+      "circle-radius": ["step", ["get", "point_count"], 16, 10, 21, 30, 26],
       "circle-stroke-color": isDark ? "#132117" : "#f7f3e8",
       "circle-stroke-width": 3,
       "circle-opacity": 0.94,
@@ -103,35 +120,28 @@ function addSiteLayers(
 
   map.addLayer({
     id: "site-points",
-    type: "circle",
+    type: "symbol",
     source: "flying-sites",
     filter: ["!", ["has", "point_count"]],
-    paint: {
-      "circle-color": [
-        "match",
-        ["get", "kind"],
-        "launch",
-        "#ed6748",
-        "landing",
-        "#4d9fe8",
-        "weather_station",
-        "#f2c84b",
-        "#6f7a73",
+    layout: {
+      "icon-image": MARKER_ICON_EXPRESSION as unknown as string,
+      // Badges grow with zoom but stay legible when zoomed out.
+      "icon-size": ["interpolate", ["linear"], ["zoom"], 8, 0.78, 12, 1.05],
+      // Overlapping markers are preferred over a cluster bubble, so collision
+      // detection is disabled and the stacking order is made explicit instead.
+      "icon-allow-overlap": true,
+      "icon-ignore-placement": true,
+      // Landings sit above launches because a launch is easy to infer from the
+      // hillside it is on and a landing field is not. Reviewed sits above both.
+      "symbol-sort-key": [
+        "-",
+        0,
+        [
+          "+",
+          ["case", ["==", ["get", "status"], "reviewed"], 10, 0],
+          ["case", ["==", ["get", "kind"], "landing"], 2, 1],
+        ],
       ],
-      "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 6, 12, 9],
-      "circle-stroke-color": [
-        "case",
-        ["==", ["get", "status"], "reviewed"],
-        isDark ? "#edf5ee" : "#172a21",
-        isDark ? "#132117" : "#ffffff",
-      ],
-      "circle-stroke-width": [
-        "case",
-        ["==", ["get", "status"], "reviewed"],
-        3,
-        2,
-      ],
-      "circle-opacity": 0.96,
     },
   })
 
@@ -162,12 +172,16 @@ export function LakeLucerneMap({
   selectedSlug,
   onSelect,
   overlays,
+  stations,
+  showAllStations,
 }: LakeLucerneMapProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<Map | null>(null)
   const onSelectRef = useRef(onSelect)
   const overlaysRef = useRef(overlays)
+  const sitesRef = useRef(sites)
   const selectedSlugRef = useRef(selectedSlug)
+  const hoveredLaunchSlugRef = useRef<string | undefined>(undefined)
   const theme = useSystemTheme()
   const themeRef = useRef(theme)
   const data = useMemo(() => toGeoJson(sites), [sites])
@@ -175,20 +189,40 @@ export function LakeLucerneMap({
 
   onSelectRef.current = onSelect
   overlaysRef.current = overlays
+  sitesRef.current = sites
   selectedSlugRef.current = selectedSlug
   dataRef.current = data
 
   const restoreMapLayers = useCallback((map: Map) => {
-    addSiteLayers(map, dataRef.current, themeRef.current)
-    syncOverlays(map, overlaysRef.current)
+    // Marker badges must exist before the symbol layer references them.
+    // Registration is async, so the layers are added once the images resolve.
+    void registerMarkerImages(map, themeRef.current)
+      .catch(() => undefined)
+      .finally(() => {
+        if (!map.getStyle()) return
+        addSiteLayers(map, dataRef.current, themeRef.current)
+        // Glide lines sit beneath the markers so pins stay clickable.
+        addGlideLayers(map, "site-clusters")
+        setGlideData(
+          map,
+          activeGlideLaunch(
+            sitesRef.current,
+            selectedSlugRef.current,
+            hoveredLaunchSlugRef.current,
+          ),
+          sitesRef.current,
+        )
+        addStationLayers(map, "site-clusters")
+        syncOverlays(map, overlaysRef.current)
 
-    if (map.getLayer("selected-site-halo")) {
-      map.setFilter("selected-site-halo", [
-        "==",
-        ["get", "slug"],
-        selectedSlugRef.current ?? "__none__",
-      ])
-    }
+        if (map.getLayer("selected-site-halo")) {
+          map.setFilter("selected-site-halo", [
+            "==",
+            ["get", "slug"],
+            selectedSlugRef.current ?? "__none__",
+          ])
+        }
+      })
   }, [])
 
   useEffect(() => {
@@ -233,6 +267,30 @@ export function LakeLucerneMap({
           zoom,
           duration: 480,
         })
+      })
+
+      map.on("mousemove", "site-points", (event: MapLayerMouseEvent) => {
+        const slug = event.features?.[0]?.properties?.slug as string | undefined
+        const kind = event.features?.[0]?.properties?.kind as string | undefined
+        hoveredLaunchSlugRef.current = slug && kind === "launch" ? slug : undefined
+        setGlideData(
+          map,
+          activeGlideLaunch(
+            sitesRef.current,
+            selectedSlugRef.current,
+            hoveredLaunchSlugRef.current,
+          ),
+          sitesRef.current,
+        )
+      })
+
+      map.on("mouseleave", "site-points", () => {
+        hoveredLaunchSlugRef.current = undefined
+        setGlideData(
+          map,
+          activeGlideLaunch(sitesRef.current, selectedSlugRef.current),
+          sitesRef.current,
+        )
       })
 
       map.on("click", "site-points", (event: MapLayerMouseEvent) => {
@@ -282,6 +340,18 @@ export function LakeLucerneMap({
 
   useEffect(() => {
     const map = mapRef.current
+    if (!map?.isStyleLoaded()) return
+    const selected = sites.find((site) => site.slug === selectedSlug)
+    const { points, activeCode } = visibleStations(
+      stations,
+      selected,
+      showAllStations,
+    )
+    setStationData(map, points, activeCode)
+  }, [stations, showAllStations, selectedSlug, sites])
+
+  useEffect(() => {
+    const map = mapRef.current
     if (!map?.isStyleLoaded() || !map.getLayer("selected-site-halo")) return
     map.setFilter("selected-site-halo", [
       "==",
@@ -290,6 +360,9 @@ export function LakeLucerneMap({
     ])
 
     const selected = sites.find((site) => site.slug === selectedSlug)
+    if (!hoveredLaunchSlugRef.current) {
+      setGlideData(map, activeGlideLaunch(sites, selectedSlug), sites)
+    }
     if (selected) {
       map.easeTo({
         center: [selected.longitude, selected.latitude],

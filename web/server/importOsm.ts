@@ -1,4 +1,7 @@
 import { database } from "./database"
+import { dedupeByProximity } from "./dedupe"
+import { resolveSiteName, splitSiteName } from "./siteNaming"
+import { parseWindSpec } from "./windDirections"
 
 const overpassUrl = "https://overpass-api.de/api/interpreter"
 const bounds = "46.72,7.95,47.28,8.90"
@@ -57,20 +60,23 @@ function elevation(tags: Record<string, string>) {
   return match ? Number(match[0]) : null
 }
 
+function directionSpec(tags: Record<string, string>) {
+  return tags["free_flying:takeoff:direction"] ?? tags.direction ?? ""
+}
+
 function directions(tags: Record<string, string>) {
-  const value =
-    tags["free_flying:takeoff:direction"] ?? tags.direction ?? ""
+  const value = directionSpec(tags)
   return value
     .split(/[;,/]/)
     .map((direction) => direction.trim().toUpperCase())
     .filter(Boolean)
 }
 
-function copy(kind: ImportKind, name: string) {
+function copy(kind: ImportKind) {
   if (kind === "launch") {
     return {
       en: {
-        summary: `${name} is mapped as a paragliding launch in OpenStreetMap.`,
+        summary: "",
         note: "This mapped record has not yet received a local operational review.",
         knownFor: ["Open-data launch record"],
         cautions: [
@@ -79,7 +85,7 @@ function copy(kind: ImportKind, name: string) {
         ],
       },
       de: {
-        summary: `${name} ist in OpenStreetMap als Gleitschirm-Startplatz erfasst.`,
+        summary: "",
         note: "Dieser Karteneintrag wurde noch nicht lokal und betrieblich geprüft.",
         knownFor: ["Open-Data-Startplatz"],
         cautions: [
@@ -92,7 +98,7 @@ function copy(kind: ImportKind, name: string) {
 
   return {
     en: {
-      summary: `${name} is mapped as a paragliding landing area in OpenStreetMap.`,
+      summary: "",
       note: "This mapped record has not yet received a local operational review.",
       knownFor: ["Open-data landing record"],
       cautions: [
@@ -101,7 +107,7 @@ function copy(kind: ImportKind, name: string) {
       ],
     },
     de: {
-      summary: `${name} ist in OpenStreetMap als Gleitschirm-Landeplatz erfasst.`,
+      summary: "",
       note: "Dieser Karteneintrag wurde noch nicht lokal und betrieblich geprüft.",
       knownFor: ["Open-Data-Landeplatz"],
       cautions: [
@@ -148,6 +154,67 @@ async function run() {
   const client = await database.connect()
   let imported = 0
   let skippedNearReviewed = 0
+  let skippedDuplicates = 0
+  let removedDuplicates = 0
+
+  const duplicateKeys = new Set<string>()
+
+  // OpenStreetMap carries some fields twice (two polygons over one meadow), so
+  // near-coincident points of the same kind are collapsed before insert. The
+  // discarded record is kept as a source so its OSM id is still traceable.
+  const dropped = new Map<string, string[]>()
+  {
+    const candidates: {
+      key: string
+      kind: string
+      latitude: number
+      longitude: number
+      name: string
+      richness: number
+    }[] = []
+
+    for (const element of payload.elements) {
+      const tags = element.tags ?? {}
+      const lat = element.lat ?? element.center?.lat
+      const lon = element.lon ?? element.center?.lon
+      if (lat == null || lon == null) continue
+      for (const kind of siteKinds(tags)) {
+        candidates.push({
+          key: `${element.type}:${element.id}:${kind}`,
+          kind,
+          latitude: lat,
+          longitude: lon,
+          name:
+            splitSiteName(tags.name ?? tags["name:de"] ?? "").name ?? "",
+          // More tags means a more completely described record.
+          richness: Object.keys(tags).length,
+        })
+      }
+    }
+
+    for (const group of dedupeByProximity(candidates)) {
+      if (!group.merged.length) continue
+      dropped.set(
+        group.kept.key,
+        group.merged.map((m) => m.key),
+      )
+      for (const merged of group.merged) duplicateKeys.add(merged.key)
+    }
+  }
+
+  // Stripping the category word can make two launches on the same hill read
+  // identically ("Brienzer Rothorn" twice). Count the cleaned names first so the
+  // compass qualifier can be kept only where it is actually doing work.
+  const nameUses = new Map<string, number>()
+  for (const element of payload.elements) {
+    const tags = element.tags ?? {}
+    if (element.lat == null && element.center?.lat == null) continue
+    const cleaned = splitSiteName(tags.name ?? tags["name:de"] ?? "").name
+    if (!cleaned) continue
+    const kindCount = siteKinds(tags).length
+    if (kindCount === 0) continue
+    nameUses.set(cleaned, (nameUses.get(cleaned) ?? 0) + kindCount)
+  }
 
   try {
     await client.query("BEGIN")
@@ -179,14 +246,29 @@ async function run() {
         }
 
         const sourceRecordId = `${element.type}:${element.id}:${kind}`
+
+        // Folded into a nearby duplicate by the dedupe pass above.
+        if (duplicateKeys.has(sourceRecordId)) {
+          skippedDuplicates += 1
+          continue
+        }
         const id = `osm-${element.type}-${element.id}-${kind}`
         const fallbackName =
           kind === "launch"
             ? `Mapped launch ${element.id}`
             : `Mapped landing ${element.id}`
-        const name = tags.name ?? tags["name:de"] ?? fallbackName
+        const rawName = tags.name ?? tags["name:de"] ?? fallbackName
+        const { name: cleanedName, qualifier } = splitSiteName(rawName)
+        const baseName = resolveSiteName(
+          rawName,
+          tags["addr:city"] ?? tags.place ?? null,
+          fallbackName,
+        )
+        const needsQualifier =
+          !!cleanedName && !!qualifier && (nameUses.get(cleanedName) ?? 0) > 1
+        const name = needsQualifier ? `${baseName} ${qualifier}` : baseName
         const slug = `${slugify(name) || "mapped-site"}-${element.id}-${kind}`
-        const text = copy(kind, name)
+        const text = copy(kind)
         const sourceUrl = `https://www.openstreetmap.org/${element.type}/${element.id}`
 
         await client.query(
@@ -203,7 +285,10 @@ async function run() {
               slug = EXCLUDED.slug,
               latitude = EXCLUDED.latitude,
               longitude = EXCLUDED.longitude,
-              elevation_m = EXCLUDED.elevation_m,
+              -- OpenStreetMap rarely carries an ele tag, while the swisstopo backfill
+              -- does. Overwriting with EXCLUDED wiped every filled elevation on
+              -- each import and silently disabled glide reachability.
+              elevation_m = COALESCE(EXCLUDED.elevation_m, sites.elevation_m),
               launch_directions = EXCLUDED.launch_directions,
               access_type = EXCLUDED.access_type,
               source_url = EXCLUDED.source_url,
@@ -245,7 +330,10 @@ async function run() {
               locale,
               name,
               tags["addr:city"] ?? tags.place ?? null,
-              text[locale].summary,
+              (locale === "de"
+                ? tags["description:de"] ?? tags.description
+                : tags["description:en"] ?? tags.description) ??
+                text[locale].summary,
               text[locale].note,
               text[locale].knownFor,
               text[locale].cautions,
@@ -253,13 +341,61 @@ async function run() {
           )
         }
 
+        for (const mergedKey of dropped.get(sourceRecordId) ?? []) {
+          const [type, osmId] = mergedKey.split(":")
+          await client.query(
+            `INSERT INTO site_sources (site_id, provider_code, confirms, label, url)
+             VALUES ($1, 'osm', 'location', $2, $3)
+             ON CONFLICT (site_id, provider_code, confirms) DO NOTHING`,
+            [
+              id,
+              `OpenStreetMap ${type}/${osmId} (duplicate of this site)`,
+              `https://www.openstreetmap.org/${type}/${osmId}`,
+            ],
+          )
+        }
+
+        // Wind windows are rebuilt from the source spec on every import so a
+        // corrected OpenStreetMap tag removes stale arcs instead of adding to
+        // them. Landings have no launch window.
+        await client.query(
+          `DELETE FROM site_wind_windows WHERE site_id = $1 AND provider_code = 'osm'`,
+          [id],
+        )
+
+        if (kind === "launch") {
+          for (const arc of parseWindSpec(directionSpec(tags))) {
+            await client.query(
+              `
+                INSERT INTO site_wind_windows (
+                  site_id, from_deg, to_deg, quality, provider_code
+                ) VALUES ($1, $2, $3, 'preferred', 'osm')
+                ON CONFLICT (site_id, from_deg, to_deg, quality) DO NOTHING
+              `,
+              [id, arc.fromDeg, arc.toDeg],
+            )
+          }
+        }
+
         imported += 1
       }
     }
 
+    // Earlier imports created rows that the dedupe pass now folds away. Remove
+    // them so a duplicate already in the table does not survive forever.
+    if (duplicateKeys.size) {
+      const removal = await client.query(
+        `DELETE FROM sites
+          WHERE provider_code = 'osm'
+            AND source_record_id = ANY($1::text[])`,
+        [[...duplicateKeys]],
+      )
+      removedDuplicates = removal.rowCount ?? 0
+    }
+
     await client.query("COMMIT")
     console.log(
-      `Imported ${imported} OpenStreetMap sites; skipped ${skippedNearReviewed} near reviewed records.`,
+      `Imported ${imported} OpenStreetMap sites; skipped ${skippedNearReviewed} near reviewed records, ${skippedDuplicates} duplicates, removed ${removedDuplicates} stale duplicate rows.`,
     )
   } catch (error) {
     await client.query("ROLLBACK")

@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   ArrowUpRight,
   Database,
+  ChevronDown,
   ExternalLink,
   Flag,
   MapPin,
@@ -16,37 +17,31 @@ import {
 } from "react-router-dom"
 
 import { spotRepository } from "@/features/spots/repository"
-import type { FlyingSite, MapLocale } from "@/features/spots/types"
-import { mapCopy } from "@/i18n/mapCopy"
+import type { FlyingSite, } from "@/features/spots/types"
+import { copy } from "@/i18n/mapCopy"
 
 interface DetailLoaderData {
   site: FlyingSite
-  locale: MapLocale
 }
 
-export async function loader({ params, request }: LoaderFunctionArgs) {
-  const locale: MapLocale = new URL(request.url).searchParams.get("lang") === "de"
-    ? "de"
-    : "en"
+export async function loader({ params }: LoaderFunctionArgs) {
   const site = params.slug
-    ? await spotRepository.findBySlug(params.slug, locale)
+    ? await spotRepository.findBySlug(params.slug)
     : undefined
 
   if (!site) throw new Response("Flying site not found", { status: 404 })
-  return { site, locale } satisfies DetailLoaderData
+  return { site } satisfies DetailLoaderData
 }
 
 export default function SpotDetailsPage() {
-  const { site, locale } = useLoaderData() as DetailLoaderData
-  const copy = mapCopy[locale]
-  const isGerman = locale === "de"
+  const { site } = useLoaderData() as DetailLoaderData
 
   return (
     <article className="research-page">
       <div className="research-page__breadcrumb">
-        <Link to={`/?lang=${locale}`}>
+        <Link to="/">
           <ArrowLeft size={15} aria-hidden="true" />
-          {isGerman ? "Zurück zur Karte" : "Back to map"}
+          {"Back to map"}
         </Link>
         <span>{copy.researchSnapshot}</span>
       </div>
@@ -70,10 +65,10 @@ export default function SpotDetailsPage() {
         </div>
         <div className="coordinate-panel">
           {site.kind === "launch" ? <Mountain aria-hidden="true" /> : <Flag aria-hidden="true" />}
-          <small>{isGerman ? "Kartenkoordinate" : "Mapped coordinate"}</small>
+          <small>{"Mapped coordinate"}</small>
           <strong>{site.latitude.toFixed(5)}° N</strong>
           <strong>{site.longitude.toFixed(5)}° E</strong>
-          <span>{isGerman ? "Nicht zur Navigation" : "Not for navigation"}</span>
+          <span>{"Not for navigation"}</span>
         </div>
       </header>
 
@@ -97,20 +92,58 @@ export default function SpotDetailsPage() {
           </dl>
 
           <section className="research-section">
-            <span>{isGerman ? "Recherchehinweis" : "Research note"}</span>
-            <h2>{isGerman ? "Was dieser Eintrag belegt." : "What this record establishes."}</h2>
+            <span>{"Research note"}</span>
+            <h2>{"What this record establishes."}</h2>
             <p>{site.researchNote || site.summary}</p>
             {site.terrain || site.accessDetail ? (
               <div className="research-notes-grid">
-                {site.terrain ? <div><strong>{isGerman ? "Gelände" : "Terrain"}</strong><p>{site.terrain}</p></div> : null}
-                {site.accessDetail ? <div><strong>{isGerman ? "Zugang" : "Access detail"}</strong><p>{site.accessDetail}</p></div> : null}
+                {site.terrain ? <div><strong>{"Terrain"}</strong><p>{site.terrain}</p></div> : null}
+                {site.accessDetail ? <div><strong>{"Access detail"}</strong><p>{site.accessDetail}</p></div> : null}
               </div>
             ) : null}
           </section>
 
+          {site.launchSections?.length ? (
+            <section className="research-section launch-sections">
+              <span>{"Launch sections"}</span>
+              <h2>{"One launch area, direction-specific sections."}</h2>
+              <p>{"These are named parts of the Niederbauen launch area, not separate flying sites. Shared access, landings, airspace, and general cautions above still apply."}</p>
+              <div className="launch-sections__list">
+                {site.launchSections.map((section) => (
+                  <details key={section.id} className="launch-section">
+                    <summary>
+                      <span>
+                        <strong>{section.name}</strong>
+                        <small>{section.windDirections.preferred.length ? `Preferred: ${section.windDirections.preferred.join(" · ")}` : "Direction not recorded"}</small>
+                      </span>
+                      <span className="launch-section__summary-end">
+                        {section.evidenceStatus === "historical" ? <em>{"Historical detail"}</em> : null}
+                        <ChevronDown aria-hidden="true" size={18} />
+                      </span>
+                    </summary>
+                    <div className="launch-section__body">
+                      <p>{section.description}</p>
+                      {section.windDirections.acceptable.length ? <p><strong>{"Also recorded:"}</strong>{` ${section.windDirections.acceptable.join(" · ")}`}</p> : null}
+                      {section.evidenceNote ? <p className="launch-section__evidence"><strong>{"Evidence note:"}</strong>{` ${section.evidenceNote}`}</p> : null}
+                      {section.cautions.length ? (
+                        <ul className="caution-list">
+                          {section.cautions.map((caution) => <li key={caution}><AlertTriangle size={17} aria-hidden="true" /> {caution}</li>)}
+                        </ul>
+                      ) : null}
+                      <p className="launch-section__source">
+                        {section.source.url ? <a href={section.source.url} target="_blank" rel="noreferrer">{section.source.label}</a> : section.source.label}
+                        {section.source.reviewedAt ? ` · reviewed ${section.source.reviewedAt}` : null}
+                      </p>
+                    </div>
+                  </details>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           <section className="research-section">
             <span>{copy.knownCautions}</span>
-            <h2>{isGerman ? "Vor dem Flug vor Ort klären." : "Resolve locally before flying."}</h2>
+            <h2>{"Resolve locally before flying."}</h2>
             <ul className="caution-list">
               {(site.cautions.length ? site.cautions : [copy.safety]).map((caution) => (
                 <li key={caution}><AlertTriangle size={17} aria-hidden="true" /> {caution}</li>
@@ -129,14 +162,14 @@ export default function SpotDetailsPage() {
           </a>
           <div>
             <ShieldCheck aria-hidden="true" />
-            <strong>{isGerman ? "Keine Startfreigabe" : "Not a launch clearance"}</strong>
+            <strong>{"Not a launch clearance"}</strong>
             <p>{copy.safety}</p>
           </div>
         </aside>
       </div>
 
-      <Link className="research-page__map-link" to={`/?lang=${locale}`}>
-        {isGerman ? "Weitere Orte am See" : "Explore more around the lake"}
+      <Link className="research-page__map-link" to={`/`}>
+        {"Explore more around the lake"}
         <ArrowUpRight size={16} aria-hidden="true" />
       </Link>
     </article>

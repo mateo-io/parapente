@@ -1,6 +1,5 @@
 import type { Map, RasterLayerSpecification, RasterSourceSpecification } from "maplibre-gl"
 
-import type { MapLocale } from "./types"
 
 /**
  * The base style is a token-free OpenStreetMap vector style. Terrain comes from
@@ -32,6 +31,15 @@ export const BASE_ATTRIBUTION =
 const SWISSTOPO_ATTRIBUTION =
   '&copy; <a href="https://www.swisstopo.admin.ch/" target="_blank" rel="noreferrer">swisstopo</a>'
 
+/**
+ * Airspace is published by the Federal Office of Civil Aviation. A map layer is
+ * an orientation aid and never a clearance: zones activate and deactivate, and
+ * the Daily Airspace Bulletin Switzerland is the source that must be consulted
+ * before a flight.
+ */
+const BAZL_ATTRIBUTION =
+  '&copy; <a href="https://www.bazl.admin.ch/" target="_blank" rel="noreferrer">BAZL</a>'
+
 const BAFU_ATTRIBUTION =
   '&copy; <a href="https://www.bafu.admin.ch/" target="_blank" rel="noreferrer">BAFU</a>'
 
@@ -41,17 +49,26 @@ export type OverlayId =
   | "slope30"
   | "aerial"
   | "wildlife"
+  | "airspaceCtr"
+  | "airspaceTma"
+  | "obstacles"
 
 export interface OverlayDefinition {
   id: OverlayId
-  /** WMTS layer identifier on wmts.geo.admin.ch. */
+  /**
+   * Federal layers are published on two different services. Most are WMTS
+   * tiles; the air-navigation obstacles are WMS only, which is why a WMTS
+   * request for them returns HTTP 400.
+   */
+  service?: "wmts" | "wms"
+  /** Layer identifier on the federal geo service. */
   wmtsLayer: string
   format: "jpeg" | "png"
   opacity: number
   attribution: string
-  label: Record<MapLocale, string>
+  label: string
   /** Shown next to the toggle so the layer is not mistaken for a judgement. */
-  caption: Record<MapLocale, string>
+  caption: string
 }
 
 /**
@@ -65,11 +82,8 @@ export const OVERLAYS: OverlayDefinition[] = [
     format: "jpeg",
     opacity: 1,
     attribution: SWISSTOPO_ATTRIBUTION,
-    label: { en: "Swiss topo map", de: "Landeskarte" },
-    caption: {
-      en: "National topographic map with contours and paths.",
-      de: "Landeskarte mit Höhenkurven und Wegen.",
-    },
+    label: "Swiss topo map",
+    caption: "National topographic map with contours and paths.",
   },
   {
     id: "aerial",
@@ -77,11 +91,8 @@ export const OVERLAYS: OverlayDefinition[] = [
     format: "jpeg",
     opacity: 1,
     attribution: SWISSTOPO_ATTRIBUTION,
-    label: { en: "Aerial imagery", de: "Luftbild" },
-    caption: {
-      en: "SWISSIMAGE orthophoto. Vegetation and surfaces.",
-      de: "SWISSIMAGE-Orthofoto. Vegetation und Oberflächen.",
-    },
+    label: "Aerial imagery",
+    caption: "SWISSIMAGE orthophoto. Vegetation and surfaces.",
   },
   {
     id: "hillshade",
@@ -89,11 +100,8 @@ export const OVERLAYS: OverlayDefinition[] = [
     format: "png",
     opacity: 0.65,
     attribution: SWISSTOPO_ATTRIBUTION,
-    label: { en: "Relief shading", de: "Reliefschattierung" },
-    caption: {
-      en: "Terrain shape from the swissALTI3D elevation model.",
-      de: "Geländeform aus dem Höhenmodell swissALTI3D.",
-    },
+    label: "Relief shading",
+    caption: "Terrain shape from the swissALTI3D elevation model.",
   },
   {
     id: "slope30",
@@ -101,11 +109,36 @@ export const OVERLAYS: OverlayDefinition[] = [
     format: "png",
     opacity: 0.55,
     attribution: SWISSTOPO_ATTRIBUTION,
-    label: { en: "Slope over 30°", de: "Hangneigung über 30°" },
-    caption: {
-      en: "Orientation aid for terrain steepness. Not a launch assessment.",
-      de: "Orientierungshilfe zur Steilheit. Keine Startplatzbewertung.",
-    },
+    label: "Slope over 30°",
+    caption: "Orientation aid for terrain steepness. Not a launch assessment.",
+  },
+  {
+    id: "airspaceCtr",
+    wmtsLayer: "ch.bazl.luftraeume-kontrollzonen",
+    format: "png",
+    opacity: 0.6,
+    attribution: BAZL_ATTRIBUTION,
+    label: "Airspace · CTR",
+    caption: "Control zones. Buochs, Emmen and Alpnach reach the lake. Not a clearance: check DABS.",
+  },
+  {
+    id: "airspaceTma",
+    wmtsLayer: "ch.bazl.luftraeume-nahkontrollbezirke",
+    format: "png",
+    opacity: 0.5,
+    attribution: BAZL_ATTRIBUTION,
+    label: "Airspace · TMA",
+    caption: "Terminal control areas above the CTRs. Not a clearance: check DABS.",
+  },
+  {
+    id: "obstacles",
+    service: "wms",
+    wmtsLayer: "ch.bazl.luftfahrthindernis",
+    format: "png",
+    opacity: 0.85,
+    attribution: BAZL_ATTRIBUTION,
+    label: "Cables and obstacles",
+    caption: "Registered air-navigation obstacles: cableways, power lines, masts. Temporary cables are not in the register.",
   },
   {
     id: "wildlife",
@@ -113,11 +146,8 @@ export const OVERLAYS: OverlayDefinition[] = [
     format: "png",
     opacity: 0.7,
     attribution: BAFU_ATTRIBUTION,
-    label: { en: "Wildlife rest zones", de: "Wildruhezonen" },
-    caption: {
-      en: "Seasonal restrictions apply. Check the official rules and dates.",
-      de: "Saisonale Einschränkungen. Offizielle Regeln und Daten prüfen.",
-    },
+    label: "Wildlife rest zones",
+    caption: "Seasonal restrictions apply. Check the official rules and dates.",
   },
 ]
 
@@ -136,6 +166,23 @@ export function layerIdFor(id: OverlayId) {
 }
 
 export function tileUrlFor(overlay: OverlayDefinition) {
+  if (overlay.service === "wms") {
+    // MapLibre substitutes {bbox-epsg-3857} per tile request.
+    const params = new URLSearchParams({
+      SERVICE: "WMS",
+      VERSION: "1.3.0",
+      REQUEST: "GetMap",
+      LAYERS: overlay.wmtsLayer,
+      STYLES: "",
+      CRS: "EPSG:3857",
+      WIDTH: "256",
+      HEIGHT: "256",
+      FORMAT: `image/${overlay.format}`,
+      TRANSPARENT: "true",
+    })
+    return `https://wms.geo.admin.ch/?${params}&BBOX={bbox-epsg-3857}`
+  }
+
   return (
     `https://wmts.geo.admin.ch/1.0.0/${overlay.wmtsLayer}` +
     `/default/current/3857/{z}/{x}/{y}.${overlay.format}`

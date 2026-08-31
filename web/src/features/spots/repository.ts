@@ -1,27 +1,28 @@
 import type {
   FlyingSite,
-  MapLocale,
   SiteKind,
   SiteListResponse,
 } from "./types"
+import { normalizeLaunchSections } from "./launchSections"
+
+function normalizeSite(site: FlyingSite): FlyingSite {
+  return { ...site, launchSections: normalizeLaunchSections(site.launchSections) }
+}
 
 export interface SpotRepository {
   list(options?: {
-    locale?: MapLocale
     kinds?: SiteKind[]
     search?: string
   }): Promise<FlyingSite[]>
-  findBySlug(slug: string, locale?: MapLocale): Promise<FlyingSite | undefined>
+  findBySlug(slug: string): Promise<FlyingSite | undefined>
 }
 
 class ApiSpotRepository implements SpotRepository {
   async list(options: {
-    locale?: MapLocale
     kinds?: SiteKind[]
     search?: string
   } = {}) {
     const params = new URLSearchParams({
-      lang: options.locale ?? "en",
       types: (options.kinds ?? ["launch", "landing"]).join(","),
     })
 
@@ -31,19 +32,19 @@ class ApiSpotRepository implements SpotRepository {
     if (!response.ok) throw new Error("Unable to load local flying sites")
 
     const payload = (await response.json()) as SiteListResponse
-    return payload.data
+    return payload.data.map(normalizeSite)
   }
 
-  async findBySlug(slug: string, locale: MapLocale = "en") {
+  async findBySlug(slug: string) {
     const response = await fetch(
-      `/api/sites/${encodeURIComponent(slug)}?lang=${locale}`,
+      `/api/sites/${encodeURIComponent(slug)}`,
     )
 
     if (response.status === 404) return undefined
     if (!response.ok) throw new Error("Unable to load local flying site")
 
     const payload = (await response.json()) as { data: FlyingSite }
-    return payload.data
+    return normalizeSite(payload.data)
   }
 }
 

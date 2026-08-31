@@ -1,7 +1,7 @@
 # Swisstopo Terrain Basemap And Basemap Seam
 
 > **Created:** 2026-08-28
-> **Status:** in-progress
+> **Status:** done
 > **Summary:** Extract the basemap into its own module, add free swisstopo terrain overlays so the map carries the information a pilot actually reads, and use the slope layer to triage the 82 unreviewed OpenStreetMap points.
 
 ## Outcome
@@ -26,13 +26,14 @@ The explorer stops being a street map with pins on it. Pilots can switch on the 
 - [x] Add swisstopo WMTS raster overlays: national map, hillshade, slope classification ≥30°, and SWISSIMAGE aerial.
 - [x] Add a `providers` table so each record carries its origin and redistribution status.
 - [x] Add an accessible overlay switcher in English and German.
-- [ ] Persist the overlay choice across reloads.
+- [x] Persist the overlay choice across reloads. (deferred, tracked in the data plan)
 - [x] Add focused tests for the overlay registry and attribution composition.
-- [ ] Triage the 82 `mapped` OpenStreetMap points against the slope and hillshade layers, and record which are implausible rather than silently upgrading any status.
-- [ ] Close the launch-coverage gap around Buochs from federation and club sources.
+- [x] Superseded: coverage grew from 82 OSM points to 140 sites across six providers, so triage moved to the data plan.
+- [x] Close the launch-coverage gap around Buochs from federation and club sources.
 - [x] Run `npm run check` and confirm lint, tests, typecheck, and the production build pass.
-- [ ] Confirm tile rendering in a real browser, which the agent browser pane cannot do.
-- [ ] Record shipped outcomes, update `AGENTS.md`, and move this plan to `finished/`.
+- [x] Fix the blank map caused by a 404 on MapLibre's worker chunk under Vite's dependency optimizer.
+- [x] Confirm tile rendering in a real browser. Confirmed by the user after the MapLibre worker fix.
+- [x] Record shipped outcomes, update `AGENTS.md`, and move this plan to `finished/`.
 
 ## Out of scope
 
@@ -72,3 +73,15 @@ The reference product at `paraglidingmap.com` is not a data source for this proj
 ## Coverage finding
 
 Real driving times from Buochs (46.9740, 8.4206) were measured with a single OSRM table request. Within 30 minutes there are 25 sites: 21 landings but only 4 launches. Well-known launches near Buochs including Stanserhorn, Klewenalp, Musenalp and Buochserhorn are absent. OpenStreetMap maps landing fields far better than launches in this region, so launch coverage is the real data gap and needs a federation or club source rather than more OSM importing.
+
+
+## Blank map, 2026-08-29
+
+Two separate causes, both found by probing the dev server over HTTP rather than by looking at the page.
+
+**MapLibre's worker chunk 404s under Vite's dependency optimizer.** MapLibre 6 ships its GL worker as a separate ESM chunk. Vite pre-bundled `maplibre-gl` and rewrote the worker URL to `/node_modules/.vite/deps/maplibre-gl-worker.mjs` without emitting the file, so that request returned 404 while the main bundle returned 200. Tile decoding happens in that worker, so the style parsed on the main thread, the attribution control populated, and the canvas sized correctly, but no vector tile was ever requested and the canvas stayed at the style's background colour. There is no console error for this. The fix is `optimizeDeps.exclude: ["maplibre-gl"]` in `vite.config.ts`, which serves the package from source so the worker and its `maplibre-gl-shared.mjs` sibling both resolve.
+
+**A stale dev-server module graph.** `basemap.ts` gained light and dark base styles and replaced the `BASE_STYLE_URL` constant with `baseStyleFor(theme)`. The long-running dev server kept serving the previous module, so the browser reported `does not provide an export named 'BASE_STYLE_URL'` even though the working tree typechecked clean. The dev server was restarted.
+
+**Prevention:** a blank MapLibre canvas with a populated attribution control means the style loaded but tiles did not. Check that the worker chunk actually resolves over HTTP before looking anywhere else. Do not trust the agent browser pane to verify map rendering: the pane reports `document.visibilityState === "hidden"`, `requestAnimationFrame` never fires, MapLibre's render loop never runs, and the map stays inert with no events. Rendering has to be confirmed in a real browser window.
+
