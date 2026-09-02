@@ -289,7 +289,13 @@ async function run() {
               -- does. Overwriting with EXCLUDED wiped every filled elevation on
               -- each import and silently disabled glide reachability.
               elevation_m = COALESCE(EXCLUDED.elevation_m, sites.elevation_m),
-              launch_directions = EXCLUDED.launch_directions,
+              -- A source-backed migration may have supplied a more precise
+              -- launch direction than the raw OSM tag. Do not erase it on
+              -- every refresh merely because this mapped feature has no tag.
+              launch_directions = CASE WHEN EXISTS (
+                SELECT 1 FROM site_wind_windows ww
+                 WHERE ww.site_id = sites.id AND ww.provider_code <> 'osm'
+              ) THEN sites.launch_directions ELSE EXCLUDED.launch_directions END,
               access_type = EXCLUDED.access_type,
               source_url = EXCLUDED.source_url,
               source_record_id = EXCLUDED.source_record_id,
@@ -324,6 +330,8 @@ async function run() {
                 research_note = EXCLUDED.research_note,
                 known_for = EXCLUDED.known_for,
                 cautions = EXCLUDED.cautions
+              WHERE site_translations.provider_code IS NULL
+                 OR site_translations.provider_code = 'osm'
             `,
             [
               id,

@@ -34,6 +34,31 @@ export function distanceMetres(
   return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(h))
 }
 
+/**
+ * Finds the actual closest matching record inside a deliberately bounded
+ * radius. Importers must not use the first record returned by PostgreSQL: two
+ * distinct launches can both be within the broad corroboration radius.
+ */
+export function closestWithin<T extends { latitude: number; longitude: number }>(
+  candidates: T[],
+  latitude: number,
+  longitude: number,
+  radiusM: number,
+) {
+  let closest: T | undefined
+  let closestDistance = radiusM
+
+  for (const candidate of candidates) {
+    const distance = distanceMetres(latitude, longitude, candidate.latitude, candidate.longitude)
+    if (distance <= closestDistance) {
+      closest = candidate
+      closestDistance = distance
+    }
+  }
+
+  return closest
+}
+
 export interface DedupeCandidate {
   key: string
   kind: string

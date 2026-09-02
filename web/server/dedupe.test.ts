@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { DUPLICATE_RADIUS_M, dedupeByProximity, distanceMetres } from "./dedupe"
+import { closestWithin, DUPLICATE_RADIUS_M, dedupeByProximity, distanceMetres } from "./dedupe"
 
 const zugA = { key: "a", kind: "landing", latitude: 47.150012, longitude: 8.513622, name: "Zug Oberwil", richness: 5 }
 const zugB = { key: "b", kind: "landing", latitude: 47.149778, longitude: 8.513618, name: "Oberwil", richness: 4 }
@@ -14,6 +14,22 @@ describe("distanceMetres", () => {
       .toBeLessThan(40)
     expect(distanceMetres(gruob.latitude, gruob.longitude, emmetten.latitude, emmetten.longitude))
       .toBeGreaterThan(350)
+  })
+})
+
+describe("closestWithin", () => {
+  it("chooses the closest launch rather than the first point inside a broad import radius", () => {
+    const distantSameArea = { id: "vorderer-gummen", latitude: 46.90265, longitude: 8.3659 }
+    const exactStationLaunch = { id: "gummen-station", latitude: 46.9019, longitude: 8.36259 }
+
+    expect(
+      closestWithin(
+        [distantSameArea, exactStationLaunch],
+        46.9019,
+        8.36259,
+        300,
+      )?.id,
+    ).toBe("gummen-station")
   })
 })
 

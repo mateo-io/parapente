@@ -1,5 +1,5 @@
 import { database } from "./database"
-import { distanceMetres } from "./dedupe"
+import { closestWithin } from "./dedupe"
 
 /**
  * ParaglidingEarth import.
@@ -106,10 +106,11 @@ async function run() {
     const elevation = Number(props.takeoff_altitude) || null
     const description = String(props.takeoff_description ?? "").trim()
 
-    const near = existing.find(
-      (site) =>
-        site.kind === kind &&
-        distanceMetres(latitude, longitude, site.latitude, site.longitude) <= SAME_SITE_M,
+    const near = closestWithin(
+      existing.filter((site) => site.kind === kind),
+      latitude,
+      longitude,
+      SAME_SITE_M,
     )
 
     // Never overwrite a record already reviewed against a federation or school
